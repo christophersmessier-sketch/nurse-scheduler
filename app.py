@@ -1,18 +1,3 @@
-This is a fantastic addition. It turns the Excel file into a "Huddle Tool."
-
-Tab 1 (Nurse Assignments): For the Charge Nurse to balance the board.
-
-Tab 2 (Patient List): For the Unit Secretary to update the whiteboard.
-
-Tab 3 (Manager Huddle): NEW - A "High Risk" summary that groups all the safety/flow concerns (Drips, Rapids, Sitters, Discharges) into simple lists so you can run the safety huddle in 30 seconds.
-
-I have updated the script to generate this 3-Tab Excel File.
-
-The Final app.py
-Replace your code in GitHub (or Colab) with this version.
-
-Python
-
 import streamlit as st
 import pandas as pd
 import numpy as np
