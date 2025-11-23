@@ -1,16 +1,3 @@
-This is a classic Streamlit quirk!
-
-The Reason: Streamlit works like a video game loop. Every time you interact with a widget (like typing in a text box), the entire script re-runs from top to bottom. Because your "Generate Assignments" logic was inside an if button_clicked: block, as soon as you typed in the email box, the script re-ran, the button was no longer "clicked," and the results vanished.
-
-The Fix: We need to use Session State. This is like a "Save Game" file for the app. It tells Streamlit: "Even if the page reloads, remember the schedule we just built."
-
-The Corrected app.py (with Memory)
-I have updated the code to store the results in st.session_state. Now, the results will stay on the screen until you upload a new file or refresh the page.
-
-Replace your app.py on GitHub with this version:
-
-Python
-
 import streamlit as st
 import pandas as pd
 import numpy as np
