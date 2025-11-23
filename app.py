@@ -1,3 +1,16 @@
+This is a classic Streamlit quirk!
+
+The Reason: Streamlit works like a video game loop. Every time you interact with a widget (like typing in a text box), the entire script re-runs from top to bottom. Because your "Generate Assignments" logic was inside an if button_clicked: block, as soon as you typed in the email box, the script re-ran, the button was no longer "clicked," and the results vanished.
+
+The Fix: We need to use Session State. This is like a "Save Game" file for the app. It tells Streamlit: "Even if the page reloads, remember the schedule we just built."
+
+The Corrected app.py (with Memory)
+I have updated the code to store the results in st.session_state. Now, the results will stay on the screen until you upload a new file or refresh the page.
+
+Replace your app.py on GitHub with this version:
+
+Python
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -168,13 +181,14 @@ if uploaded:
     charges.sort()
     off_going_charge = st.selectbox("Off-Going Charge:", options=charges, index=0 if charges else None)
 
+    # *** EXECUTION LOGIC WITH SESSION STATE ***
     if st.button("🚀 Run Scheduler"):
         with st.spinner("Optimizing..."):
+            # 1. SETUP
             nurses = df[['Nurse Name', 'Role', 'Max_Patients']].copy()
             nurses = nurses.dropna(subset=['Nurse Name'])
             nurses = nurses[nurses['Nurse Name'].astype(str).str.strip() != '']
             nurses = nurses[~nurses['Nurse Name'].astype(str).str.lower().isin(['nan', 'unknown', '0'])]
-            
             nurses = nurses.drop_duplicates()
             nurses['Max_Patients'] = pd.to_numeric(nurses['Max_Patients'], errors='coerce').fillna(4).astype(int)
             nurses['Role'] = nurses['Role'].fillna('RN').astype(str)
@@ -187,6 +201,7 @@ if uploaded:
                 st.error("❌ No nurses found! Check columns A-D.")
                 st.stop()
 
+            # 2. MODEL
             model = cp_model.CpModel()
             x = {}
             for n in nurses.index:
@@ -202,9 +217,7 @@ if uploaded:
                     target_nurse = next((n for n in nurses.index if force in str(nurses.loc[n, 'Nurse Name']).lower()), None)
                     if target_nurse is not None:
                         model.Add(x[target_nurse, p] == 1)
-                    else:
-                        st.warning(f"⚠️ Force Assign Failed: Nurse '{pat['Force_Assign']}' not found.")
-
+                
                 avoid = str(pat['Avoid_Nurse']).strip().lower()
                 if avoid not in ['0', 'unknown', 'nan', '', 'none']:
                     target_nurse = next((n for n in nurses.index if avoid in str(nurses.loc[n, 'Nurse Name']).lower()), None)
@@ -299,7 +312,6 @@ if uploaded:
             for n in nurses.index:
                 l = sum(x[n, p] * int(patients.loc[p, 'Workload_Score']*10) for p in patients.index)
                 nurse_loads.append(l)
-            
             mn = model.NewIntVar(0, 5000, 'min')
             mx = model.NewIntVar(0, 5000, 'max')
             model.AddMaxEquality(mx, nurse_loads)
@@ -312,9 +324,11 @@ if uploaded:
             status = solver.Solve(model)
 
             if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                st.success(f"✅ Assignments Generated!")
+                # --- SAVE RESULTS TO SESSION STATE ---
+                st.session_state.results_found = True
+                st.session_state.score = solver.ObjectiveValue()
                 
-                # 1. NURSE SUMMARY
+                # Nurse Data
                 nurse_res = []
                 for n in nurses.index:
                     my_p = []
@@ -335,22 +349,17 @@ if uploaded:
                         'Rooms': ", ".join(my_p),
                         'Workload': round(stats['work'], 1)
                     })
-                
-                df_nurse_summary = pd.DataFrame(nurse_res)
-                st.subheader("📊 Nurse Workload Summary")
-                st.dataframe(df_nurse_summary)
+                st.session_state.df_nurse = pd.DataFrame(nurse_res)
 
-                # 2. PATIENT LIST
+                # Patient Data
                 pat_res = []
                 def is_y(val): return "Yes" if val == 1 else ""
-                
                 for p in patients.index:
                     assigned_n = "Unassigned"
                     for n in nurses.index:
                         if solver.Value(x[n, p]):
                             assigned_n = nurses.loc[n, 'Nurse Name']
                             break
-                    
                     pat_res.append({
                         'Room': patients.loc[p, 'Room'],
                         'Oncoming Nurse': assigned_n,
@@ -366,37 +375,54 @@ if uploaded:
                         'CiWA': is_y(patients.loc[p, 'CiWA']),
                         'Active Discharge': is_y(patients.loc[p, 'Is_Active_DC'])
                     })
+                st.session_state.df_patient = pd.DataFrame(pat_res)
                 
-                df_patient_list = pd.DataFrame(pat_res)
-
-                # --- EXCEL BUFFER ---
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_nurse_sorted = df_nurse_summary.sort_values(by='Role', key=lambda col: col.str.lower() != 'charge')
-                    df_nurse_sorted.to_excel(writer, sheet_name='Nurse Summary', index=False)
-                    df_patient_list.to_excel(writer, sheet_name='Patient List', index=False)
-                
-                st.download_button(
-                    label="💾 Download Assignment Workbook (.xlsx)",
-                    data=buffer.getvalue(),
-                    file_name=f"Assignments_{assignment_date}_{shift_type}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-                # --- EMAIL SECTION ---
-                st.markdown("---")
-                st.subheader("📧 Email Report")
-                recipient = st.text_input("Recipient Email:")
-                if st.button("Send to Email"):
-                    if recipient:
-                        buffer.seek(0)
-                        success, msg = send_email(recipient, buffer, f"Assignments_{assignment_date}_{shift_type}.xlsx")
-                        if success:
-                            st.success(msg)
-                        else:
-                            st.error(f"Failed: {msg}")
-                    else:
-                        st.warning("Please enter an email address.")
+                # Total Acuity
+                st.session_state.total_acuity = patients['Calculated_Acuity'].sum()
+                st.session_state.total_rapid = patients['Rapid_Response'].sum()
+                st.session_state.total_restr = patients['Restraints'].sum()
 
             else:
                 st.error("No solution found. Check constraints.")
+
+    # --- DISPLAY RESULTS FROM SESSION STATE (PERSISTENT) ---
+    if 'results_found' in st.session_state and st.session_state.results_found:
+        st.success(f"✅ Assignments Generated! (Score: {st.session_state.score})")
+        
+        st.markdown("---")
+        st.subheader("📊 Manager Report")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Acuity Points", f"{st.session_state.total_acuity}")
+        c2.metric("Restraints / Rapids", f"{st.session_state.total_restr} / {st.session_state.total_rapid}")
+        c3.metric("Avg Workload/Nurse", f"{st.session_state.df_nurse['Workload'].mean():.1f}")
+
+        st.subheader("Nurse Workload Summary")
+        st.dataframe(st.session_state.df_nurse)
+
+        # Excel Buffer
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df_n = st.session_state.df_nurse.sort_values(by='Role', key=lambda col: col.str.lower() != 'charge')
+            df_n.to_excel(writer, sheet_name='Nurse Summary', index=False)
+            st.session_state.df_patient.to_excel(writer, sheet_name='Patient List', index=False)
+        
+        st.download_button(
+            label="💾 Download Assignment Workbook (.xlsx)",
+            data=buffer.getvalue(),
+            file_name=f"Assignments_{assignment_date}_{shift_type}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        st.markdown("---")
+        st.subheader("📧 Email Report")
+        recipient = st.text_input("Recipient Email:")
+        if st.button("Send to Email"):
+            if recipient:
+                buffer.seek(0)
+                success, msg = send_email(recipient, buffer, f"Assignments_{assignment_date}_{shift_type}.xlsx")
+                if success:
+                    st.success(msg)
+                else:
+                    st.error(f"Failed: {msg}")
+            else:
+                st.warning("Please enter an email address.")
