@@ -65,43 +65,32 @@ def calculate_acuity_score(row):
     med_str = str(row['Med_Mgt']).lower()
     
     # --- LEVEL 4 (HIGH RISK) ---
-    # Respiratory
     if 'bipap' in o2_str or 'hiflow' in o2_str or 'high' in o2_str: return 4
-    # Safety
     if row['Restraints'] == 1: return 4
-    # Meds (High Demand Drips)
     if row['Insulin_Gtt'] == 1: return 4
     if row['Titratable_Gtt'] == 1: return 4 
         
     # --- LEVEL 3 (COMPLEX) ---
-    # Respiratory
     if 'mid' in o2_str or 'midflow' in o2_str or 'venti' in o2_str: 
         current_max_level = max(current_max_level, 3)
-    # Safety (Sitter is mapped to 1 if present)
     if row['Sitter'] == 1: 
         current_max_level = max(current_max_level, 3)
-    # Meds
     if row['Heparin_NonTher'] == 1: 
         current_max_level = max(current_max_level, 3)
     if 'high' in med_str: 
         current_max_level = max(current_max_level, 3)
-    # Labs
     if row['DI_Score'] > 60: 
         current_max_level = max(current_max_level, 3)
 
     # --- LEVEL 2 (MODERATE) ---
-    # Respiratory
     if 'nc' in o2_str or 'nasal' in o2_str: 
         current_max_level = max(current_max_level, 2)
-    # Meds
     if row['Heparin_Ther'] == 1: 
         current_max_level = max(current_max_level, 2)
-    # Safety
     if row['CiWA'] == 1: 
         current_max_level = max(current_max_level, 2)
     if 'med' in med_str: 
         current_max_level = max(current_max_level, 2)
-    # Labs
     if row['DI_Score'] > 35: 
         current_max_level = max(current_max_level, 2)
 
@@ -109,25 +98,16 @@ def calculate_acuity_score(row):
 
 # --- DATA PREP ---
 def preprocess_data(df, target_date, shift):
-    # Standardize columns
     df.columns = [str(c).strip() for c in df.columns]
     
-    # Precise mapping based on your file structure
     col_map = {
-        'Nurse Name': 'Nurse Name', 
-        'Role': 'Role', 
-        'Max_Patients': 'Max_Patients',
+        'Nurse Name': 'Nurse Name', 'Role': 'Role', 'Max_Patients': 'Max_Patients',
         'Room': 'Room', 
-        'Current_Nurse': 'Current_Nurse', 
-        'Nurse_24hrs_Ago': 'Nurse_24hrs_Ago',
-        
-        # DRIPS (Columns L:O)
+        'Current_Nurse': 'Current_Nurse', 'Nurse_24hrs_Ago': 'Nurse_24hrs_Ago',
         'Insulin_Gtt': 'Insulin_Gtt', 
         'Heparin_Gtt (Non-therapuetic)': 'Heparin_NonTher',
         'Heparin_Gtt (Therapuetic)': 'Heparin_Ther',
         'Titratable_Gtt': 'Titratable_Gtt',
-        
-        # OTHER CLINICAL
         'Isolation': 'Isolation', 
         'CiWA': 'CiWA', 
         'Total_Care': 'Total_Care',
@@ -135,40 +115,30 @@ def preprocess_data(df, target_date, shift):
         'Transfer_Planned': 'Transfer_Planned',
         'New_Patient': 'New_Patient', 
         'Room Empty': 'Room Empty',
-        
-        # SPECIFIC TEXT INPUTS
-        'Supplmental_O2': 'O2_Device',  # Note the typo in source file!
+        'Supplmental_O2': 'O2_Device',
         'Med_Management': 'Med_Mgt',
         'Restraints': 'Restraints',
         'Sitter': 'Sitter',
         'Rapid_Response': 'Rapid_Response',
         'DI_Score': 'DI_Score',
-        
-        # OVERRIDES
         'Force_Assign': 'Force_Assign',
         'Avoid_Nurse': 'Avoid_Nurse'
     }
     
     clean = pd.DataFrame()
     for excel_header, internal_name in col_map.items():
-        # Try exact match first, then loose match
         if excel_header in df.columns:
             clean[internal_name] = df[excel_header]
         else:
-            # Look for case-insensitive match
             match = next((c for c in df.columns if c.lower() == excel_header.lower()), None)
             if match:
                 clean[internal_name] = df[match]
             else:
-                # Default values
                 clean[internal_name] = 0 if internal_name not in ['O2_Device', 'Med_Mgt', 'Force_Assign', 'Avoid_Nurse', 'Nurse Name', 'Current_Nurse'] else None
 
-    # BINARY CLEANUP (Handle Yes, Y, 1, True, 1:1, VSC)
-    # We define a custom cleaner to handle Sitter codes
     def clean_bool(val):
         s = str(val).strip().lower()
-        if s in ['yes', 'y', '1', 'true', '1:1', 'vsc', 'safety']:
-            return 1
+        if s in ['yes', 'y', '1', 'true', '1:1', 'vsc', 'safety']: return 1
         return 0
 
     binary_cols = ['Titratable_Gtt', 'Insulin_Gtt', 'Isolation', 'CiWA', 'Total_Care', 
@@ -178,7 +148,6 @@ def preprocess_data(df, target_date, shift):
     for c in binary_cols:
         clean[c] = clean[c].apply(clean_bool)
 
-    # Date & Score Cleanup
     clean['Discharge_Planned'] = pd.to_datetime(clean['Discharge_Planned'], errors='coerce').dt.date
     clean['Is_Active_DC'] = 0
     if shift == "Day":
@@ -186,10 +155,7 @@ def preprocess_data(df, target_date, shift):
     
     clean['DI_Score'] = pd.to_numeric(clean['DI_Score'], errors='coerce').fillna(0)
     
-    # Ghost Data (Empty Rooms)
     mask_reset = (clean['Room Empty'] == 1) | (clean['New_Patient'] == 1)
-    
-    # Calculate Acuity
     clean['Calculated_Acuity'] = clean.apply(calculate_acuity_score, axis=1)
     
     if mask_reset.any():
@@ -197,7 +163,6 @@ def preprocess_data(df, target_date, shift):
         cols_to_wipe = ['Titratable_Gtt', 'Insulin_Gtt', 'Isolation', 'CiWA', 'Heparin_Ther', 'Heparin_NonTher', 'Restraints', 'DI_Score', 'Sitter', 'Rapid_Response']
         clean.loc[mask_reset, cols_to_wipe] = 0
 
-    # Workload Score
     clean['Workload_Score'] = (
         clean['Calculated_Acuity'] + 
         (clean['DI_Score'] / 20.0) +
@@ -220,7 +185,7 @@ if uploaded:
     df = preprocess_data(raw, assignment_date, shift_type)
     
     with st.expander("📋 Data Preview"):
-        st.dataframe(df[['Room', 'Calculated_Acuity', 'O2_Device', 'Sitter', 'Workload_Score']])
+        st.dataframe(df[['Room', 'Calculated_Acuity', 'Titratable_Gtt', 'Insulin_Gtt', 'Heparin_NonTher']])
 
     charges = [n for n in df['Current_Nurse'].unique() if str(n).lower() not in ['nan','0','unknown','']]
     charges.sort()
@@ -254,7 +219,6 @@ if uploaded:
             for p in patients.index:
                 model.Add(sum(x[n, p] for n in nurses.index) == 1)
 
-            # Overrides
             for p, pat in patients.iterrows():
                 force = str(pat['Force_Assign']).strip().lower()
                 if force not in ['0', 'unknown', 'nan', '', 'none']:
@@ -274,8 +238,7 @@ if uploaded:
             for n, nurse in nurses.iterrows():
                 count = sum(x[n, p] for p in patients.index)
                 
-                # SUMS
-                # Note: Titratable and Insulin are High Demand
+                # Sums (Include ALL drips in logic)
                 t_titr = sum(x[n, p] * patients.loc[p, 'Titratable_Gtt'] for p in patients.index)
                 t_ins = sum(x[n, p] * patients.loc[p, 'Insulin_Gtt'] for p in patients.index)
                 t_iso = sum(x[n, p] * patients.loc[p, 'Isolation'] for p in patients.index)
@@ -286,16 +249,13 @@ if uploaded:
                 
                 nurse_dcs.append(t_dc) 
 
-                # HARD RULE: Max 1 Insulin Drip per Nurse
+                # Safety Rules
                 model.Add(t_ins <= limit_insulin)
-                
-                # HARD RULE: If Insulin, Max Patients = 3
                 has_insulin = model.NewBoolVar(f'has_ins_{n}')
                 model.Add(t_ins > 0).OnlyEnforceIf(has_insulin)
                 model.Add(t_ins == 0).OnlyEnforceIf(has_insulin.Not())
                 model.Add(count <= 3).OnlyEnforceIf(has_insulin)
 
-                # Soft Max Patients
                 roster_limit = int(nurse['Max_Patients'])
                 model.Add(count <= 6)
                 excess = model.NewIntVar(0, 6, f'excess_{n}')
@@ -303,7 +263,6 @@ if uploaded:
                 model.Add(excess >= 0)
                 objs.append(excess * -500)
 
-                # Charge Rules
                 if str(nurse['Role']).lower() == 'charge':
                     model.Add(t_empty == 0)
                     model.Add(t_titr == 0)
@@ -319,7 +278,6 @@ if uploaded:
                 
                 model.Add(t_iso <= 2)
 
-            # Balance Discharges
             min_dc = model.NewIntVar(0, 10, 'min_dc')
             max_dc = model.NewIntVar(0, 10, 'max_dc')
             model.AddMaxEquality(max_dc, nurse_dcs)
@@ -376,11 +334,9 @@ if uploaded:
             status = solver.Solve(model)
 
             if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                # SAVE RESULTS
                 st.session_state.results_found = True
                 st.session_state.score = solver.ObjectiveValue()
                 
-                # 1. NURSE TABLE
                 nurse_res = []
                 for n in nurses.index:
                     my_p = []
@@ -393,7 +349,6 @@ if uploaded:
                             my_p.append(lbl)
                             stats['work'] += patients.loc[p, 'Workload_Score']
                             stats['dc'] += patients.loc[p, 'Is_Active_DC']
-                    
                     nurse_res.append({
                         'Nurse': nurses.loc[n, 'Nurse Name'],
                         'Role': nurses.loc[n, 'Role'],
@@ -403,12 +358,8 @@ if uploaded:
                     })
                 st.session_state.df_nurse = pd.DataFrame(nurse_res)
 
-                # 2. PATIENT LIST
                 pat_res = []
                 def is_y(val): return "Yes" if val == 1 else ""
-                def get_o2(val): return str(val) if str(val)!='0' else ""
-                def get_sitter(val): return "1:1" if val==1 else ""
-
                 for p in patients.index:
                     assigned_n = "Unassigned"
                     for n in nurses.index:
@@ -424,43 +375,37 @@ if uploaded:
                         'Insulin': is_y(patients.loc[p, 'Insulin_Gtt']),
                         'Heparin': is_y(patients.loc[p, 'Heparin_Ther']),
                         'Restraints': is_y(patients.loc[p, 'Restraints']),
-                        'Sitter': get_sitter(patients.loc[p, 'Sitter']),
+                        'Sitter': is_y(patients.loc[p, 'Sitter']),
                         'Rapid': is_y(patients.loc[p, 'Rapid_Response']),
                         'Isolation': is_y(patients.loc[p, 'Isolation']),
                         'CiWA': is_y(patients.loc[p, 'CiWA']),
-                        'O2': get_o2(patients.loc[p, 'O2_Device']),
                         'Active Discharge': is_y(patients.loc[p, 'Is_Active_DC'])
                     })
                 st.session_state.df_patient = pd.DataFrame(pat_res)
 
-                # 3. MANAGER REPORT
+                # --- FIXED MANAGER REPORT LOGIC ---
                 mgr_res = []
-                
-                # Drips
-                drip_mask = (patients['Titratable_Gtt']==1) | (patients['Insulin_Gtt']==1) | (patients['Heparin_Ther']==1)
+                # Fix: Include ALL drip types in the mask
+                drip_mask = (patients['Titratable_Gtt']==1) | (patients['Insulin_Gtt']==1) | (patients['Heparin_Ther']==1) | (patients['Heparin_NonTher']==1)
                 if drip_mask.any():
                     rooms = patients.loc[drip_mask, 'Room'].tolist()
-                    mgr_res.append({'Category': 'Active Drips', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
+                    mgr_res.append({'Category': 'Active Drips (All Types)', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
                 
-                # Restraints
                 rest_mask = (patients['Restraints']==1)
                 if rest_mask.any():
                     rooms = patients.loc[rest_mask, 'Room'].tolist()
                     mgr_res.append({'Category': 'Restraints', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
 
-                # Rapids
                 rapid_mask = (patients['Rapid_Response']==1)
                 if rapid_mask.any():
                     rooms = patients.loc[rapid_mask, 'Room'].tolist()
                     mgr_res.append({'Category': 'Rapid Responses', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
 
-                # Sitters
                 sit_mask = (patients['Sitter']==1)
                 if sit_mask.any():
                     rooms = patients.loc[sit_mask, 'Room'].tolist()
                     mgr_res.append({'Category': 'Sitters (1:1)', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
 
-                # Active Discharges
                 dc_mask = (patients['Is_Active_DC']==1)
                 if dc_mask.any():
                     rooms = patients.loc[dc_mask, 'Room'].tolist()
@@ -468,7 +413,6 @@ if uploaded:
 
                 st.session_state.df_manager = pd.DataFrame(mgr_res)
                 
-                # Stats for Dashboard
                 st.session_state.total_acuity = patients['Calculated_Acuity'].sum()
                 st.session_state.total_restr = patients['Restraints'].sum()
                 st.session_state.total_rapid = patients['Rapid_Response'].sum()
@@ -476,7 +420,6 @@ if uploaded:
             else:
                 st.error("No solution found. Check constraints.")
 
-    # --- DISPLAY ---
     if 'results_found' in st.session_state and st.session_state.results_found:
         st.success(f"✅ Assignments Generated!")
         
@@ -491,7 +434,6 @@ if uploaded:
         st.subheader("Nurse Workload Summary")
         st.dataframe(st.session_state.df_nurse)
 
-        # Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df_n = st.session_state.df_nurse.sort_values(by='Role', key=lambda col: col.str.lower() != 'charge')
