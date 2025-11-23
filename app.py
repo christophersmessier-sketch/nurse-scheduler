@@ -88,71 +88,56 @@ def calculate_acuity_score(row):
 
 # --- DATA PREP ---
 def preprocess_data(df, target_date, shift):
-    # Standardize input columns (remove spaces)
+    # Standardize input columns
     df.columns = [str(c).strip() for c in df.columns]
     
-    # Define Mappings (Internal Name : List of possible Excel Headers)
-    # This allows us to catch "Titratable_Gtt" AND "Titratable Gtt" AND "Titratable"
-    mapping_dict = {
-        'Nurse Name': ['Nurse Name', 'Nurse'],
-        'Role': ['Role'],
-        'Max_Patients': ['Max_Patients', 'Max Patients'],
-        'Room': ['Room'],
-        'Current_Nurse': ['Current_Nurse', 'Current Nurse'],
-        'Nurse_24hrs_Ago': ['Nurse_24hrs_Ago', 'Nurse 24hrs Ago'],
-        
-        # Drips (Aggressive Matching)
-        'Insulin_Gtt': ['Insulin_Gtt', 'Insulin Gtt', 'Insulin'],
-        'Titratable_Gtt': ['Titratable_Gtt', 'Titratable Gtt', 'Titratable'],
-        'Heparin_Ther': ['Heparin_Gtt (Therapuetic)', 'Heparin Therapeutic', 'Heparin Ther'],
-        'Heparin_NonTher': ['Heparin_Gtt (Non-therapuetic)', 'Heparin Non-Therapeutic', 'Heparin NonTher'],
-        
-        # Clinical
-        'Isolation': ['Isolation', 'Iso'],
-        'CiWA': ['CiWA', 'CIWA'],
-        'Total_Care': ['Total_Care', 'Total Care'],
-        'Restraints': ['Restraints', 'Restraint'],
-        'Sitter': ['Sitter'],
-        'Rapid_Response': ['Rapid_Response', 'Rapid Response', 'Rapid'],
-        'DI_Score': ['DI_Score', 'Deterioration Index', 'DI'],
-        'O2_Device': ['Supplmental_O2', 'Supplemental O2', 'O2 Device', 'O2'],
-        'Med_Mgt': ['Med_Management', 'Med Management', 'Meds'],
-        
-        # Admin
-        'Discharge_Planned': ['Discharge_Planned', 'Discharge'],
-        'Transfer_Planned': ['Transfer_Planned', 'Transfer'],
-        'New_Patient': ['New_Patient', 'New Patient'],
-        'Room Empty': ['Room Empty', 'Empty Room'],
-        'Force_Assign': ['Force_Assign', 'Force'],
-        'Avoid_Nurse': ['Avoid_Nurse', 'Avoid']
+    col_map = {
+        'Nurse Name': 'Nurse Name', 'Role': 'Role', 'Max_Patients': 'Max_Patients',
+        'Room': 'Room', 
+        'Current_Nurse': 'Current_Nurse', 'Nurse_24hrs_Ago': 'Nurse_24hrs_Ago',
+        'Titratable_Gtt': 'Titratable_Gtt', 'Insulin_Gtt': 'Insulin_Gtt', 
+        'Isolation': 'Isolation', 'CiWA': 'CiWA', 'Total_Care': 'Total_Care',
+        'Discharge_Planned': 'Discharge_Planned', 'Transfer_Planned': 'Transfer_Planned',
+        'New_Patient': 'New_Patient', 'Room Empty': 'Room Empty',
+        # Specifics
+        'Heparin_Gtt': 'Heparin_Gtt', # Single Column Preference
+        'Heparin_Gtt (Therapuetic)': 'Heparin_Ther_Split', # Legacy
+        'Heparin_Gtt (Non-therapuetic)': 'Heparin_NonTher_Split', # Legacy
+        'Supplmental_O2': 'O2_Device',
+        'Med_Management': 'Med_Mgt',
+        'Restraints': 'Restraints',
+        'Sitter': 'Sitter',
+        'Rapid_Response': 'Rapid_Response',
+        'DI_Score': 'DI_Score',
+        'Force_Assign': 'Force_Assign', 'Avoid_Nurse': 'Avoid_Nurse'
     }
     
     clean = pd.DataFrame()
-    
-    # Fuzzy Match Loop
-    for internal, candidates in mapping_dict.items():
-        found = False
-        for cand in candidates:
-            # Try exact match
-            if cand in df.columns:
-                clean[internal] = df[cand]
-                found = True
-                break
-            # Try case-insensitive match
-            match = next((c for c in df.columns if c.lower() == cand.lower()), None)
-            if match:
-                clean[internal] = df[match]
-                found = True
-                break
-        
-        if not found:
-            # Default Values
-            if internal in ['O2_Device', 'Med_Mgt', 'Force_Assign', 'Avoid_Nurse', 'Nurse Name', 'Current_Nurse']:
-                clean[internal] = 0
-            else:
-                clean[internal] = 0
+    for excel_header, internal_name in col_map.items():
+        if excel_header in df.columns:
+            clean[internal_name] = df[excel_header]
+        else:
+            # Fuzzy match
+            match = next((c for c in df.columns if c.lower() == excel_header.lower()), None)
+            clean[internal_name] = df[match] if match else 0
 
-    # Clean Binary
+    # --- SINGLE COLUMN HEPARIN LOGIC ---
+    # Check if we have the single column
+    if 'Heparin_Gtt' in clean.columns and not clean['Heparin_Gtt'].astype(str).str.contains('0').all():
+        # Parse single column
+        clean['Heparin_NonTher'] = clean['Heparin_Gtt'].astype(str).apply(lambda x: 1 if 'non' in x.lower() else 0)
+        clean['Heparin_Ther'] = clean['Heparin_Gtt'].astype(str).apply(lambda x: 1 if 'ther' in x.lower() and 'non' not in x.lower() else 0)
+    else:
+        # Fallback to split columns if they exist
+        if 'Heparin_Ther_Split' in clean.columns:
+            clean['Heparin_Ther'] = clean['Heparin_Ther_Split'].astype(str).apply(lambda x: 1 if x.lower() in ['yes','y','1'] else 0)
+        else: clean['Heparin_Ther'] = 0
+        
+        if 'Heparin_NonTher_Split' in clean.columns:
+            clean['Heparin_NonTher'] = clean['Heparin_NonTher_Split'].astype(str).apply(lambda x: 1 if x.lower() in ['yes','y','1'] else 0)
+        else: clean['Heparin_NonTher'] = 0
+
+    # --- BINARY CLEANUP ---
     def clean_bool(val):
         s = str(val).strip().lower()
         if s in ['yes', 'y', '1', 'true', '1:1', 'vsc', 'safety']: return 1
@@ -160,7 +145,7 @@ def preprocess_data(df, target_date, shift):
 
     binary_cols = ['Titratable_Gtt', 'Insulin_Gtt', 'Isolation', 'CiWA', 'Total_Care', 
                    'Transfer_Planned', 'New_Patient', 'Room Empty',
-                   'Heparin_Ther', 'Heparin_NonTher', 'Restraints', 'Sitter', 'Rapid_Response']
+                   'Restraints', 'Sitter', 'Rapid_Response']
     
     for c in binary_cols:
         clean[c] = clean[c].apply(clean_bool)
@@ -201,12 +186,8 @@ if uploaded:
     raw = pd.read_excel(uploaded)
     df = preprocess_data(raw, assignment_date, shift_type)
     
-    # --- DEBUG SECTION ---
-    with st.expander("🔍 Debug: Check Drips & Acuity"):
-        st.write("This table shows what the script 'sees' before assigning.")
-        # Filter to show only rows with clinical data
-        debug_view = df[['Room', 'Titratable_Gtt', 'Insulin_Gtt', 'Heparin_Ther', 'Heparin_NonTher', 'Calculated_Acuity']]
-        st.dataframe(debug_view)
+    with st.expander("📋 Data Preview"):
+        st.dataframe(df[['Room', 'Calculated_Acuity', 'Titratable_Gtt', 'Insulin_Gtt', 'Heparin_Ther', 'Heparin_NonTher']])
 
     charges = [n for n in df['Current_Nurse'].unique() if str(n).lower() not in ['nan','0','unknown','']]
     charges.sort()
@@ -218,6 +199,7 @@ if uploaded:
             nurses = nurses.dropna(subset=['Nurse Name'])
             nurses = nurses[nurses['Nurse Name'].astype(str).str.strip() != '']
             nurses = nurses[~nurses['Nurse Name'].astype(str).str.lower().isin(['nan', 'unknown', '0'])]
+            
             nurses = nurses.drop_duplicates()
             nurses['Max_Patients'] = pd.to_numeric(nurses['Max_Patients'], errors='coerce').fillna(4).astype(int)
             nurses['Role'] = nurses['Role'].fillna('RN').astype(str)
@@ -392,7 +374,8 @@ if uploaded:
                         'Acuity': patients.loc[p, 'Calculated_Acuity'],
                         'Titratable': is_y(patients.loc[p, 'Titratable_Gtt']),
                         'Insulin': is_y(patients.loc[p, 'Insulin_Gtt']),
-                        'Heparin': is_y(patients.loc[p, 'Heparin_Ther']),
+                        'Heparin_Ther': is_y(patients.loc[p, 'Heparin_Ther']),
+                        'Heparin_NonTher': is_y(patients.loc[p, 'Heparin_NonTher']),
                         'Restraints': is_y(patients.loc[p, 'Restraints']),
                         'Sitter': get_sitter(patients.loc[p, 'Sitter']),
                         'Rapid': is_y(patients.loc[p, 'Rapid_Response']),
@@ -403,32 +386,57 @@ if uploaded:
                     })
                 st.session_state.df_patient = pd.DataFrame(pat_res)
 
+                # --- MANAGER REPORT (FIXED) ---
                 mgr_res = []
-                # Combined Drip Check
-                drip_mask = (patients['Titratable_Gtt']==1) | (patients['Insulin_Gtt']==1) | (patients['Heparin_Ther']==1) | (patients['Heparin_NonTher']==1)
-                if drip_mask.any():
-                    rooms = patients.loc[drip_mask, 'Room'].tolist()
-                    mgr_res.append({'Category': 'Active Drips (All Types)', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
                 
-                rest_mask = (patients['Restraints']==1)
-                if rest_mask.any():
-                    rooms = patients.loc[rest_mask, 'Room'].tolist()
-                    mgr_res.append({'Category': 'Restraints', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
+                # Active Drips (Detailed)
+                drip_list = []
+                for i, r in patients.iterrows():
+                    drips = []
+                    if r['Insulin_Gtt']==1: drips.append("Insulin")
+                    if r['Titratable_Gtt']==1: drips.append("Titratable")
+                    if r['Heparin_Ther']==1: drips.append("Heparin(T)")
+                    if r['Heparin_NonTher']==1: drips.append("Heparin(NT)")
+                    if drips:
+                        drip_list.append(f"{r['Room']} ({', '.join(drips)})")
+                
+                if drip_list:
+                    mgr_res.append({'Category': 'Active Drips', 'Count': len(drip_list), 'Rooms': ", ".join(drip_list)})
 
+                # Respiratory (Non-Zero O2)
+                resp_list = []
+                for i, r in patients.iterrows():
+                    if str(r['O2_Device']) not in ['0', 'nan', '']:
+                        resp_list.append(f"{r['Room']} ({r['O2_Device']})")
+                if resp_list:
+                    mgr_res.append({'Category': 'Respiratory Watch', 'Count': len(resp_list), 'Rooms': ", ".join(resp_list)})
+
+                # Rapids
                 rapid_mask = (patients['Rapid_Response']==1)
                 if rapid_mask.any():
                     rooms = patients.loc[rapid_mask, 'Room'].tolist()
                     mgr_res.append({'Category': 'Rapid Responses', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
 
-                sit_mask = (patients['Sitter']==1)
-                if sit_mask.any():
-                    rooms = patients.loc[sit_mask, 'Room'].tolist()
-                    mgr_res.append({'Category': 'Sitters (1:1)', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
+                # Restraints
+                rest_mask = (patients['Restraints']==1)
+                if rest_mask.any():
+                    rooms = patients.loc[rest_mask, 'Room'].tolist()
+                    mgr_res.append({'Category': 'Restraints', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
 
+                # Sitters
+                sit_list = []
+                for i, r in patients.iterrows():
+                    if r['Sitter'] == 1:
+                        # Try to grab original text if available, else generic
+                        sit_list.append(f"{r['Room']} (1:1)")
+                if sit_list:
+                    mgr_res.append({'Category': 'Sitters', 'Count': len(sit_list), 'Rooms': ", ".join(sit_list)})
+
+                # Discharges
                 dc_mask = (patients['Is_Active_DC']==1)
                 if dc_mask.any():
                     rooms = patients.loc[dc_mask, 'Room'].tolist()
-                    mgr_res.append({'Category': 'Today\'s Discharges', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
+                    mgr_res.append({'Category': 'Active Discharges', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
 
                 st.session_state.df_manager = pd.DataFrame(mgr_res)
                 st.session_state.total_acuity = patients['Calculated_Acuity'].sum()
@@ -438,6 +446,7 @@ if uploaded:
             else:
                 st.error("No solution found. Check constraints.")
 
+    # --- DISPLAY ---
     if 'results_found' in st.session_state and st.session_state.results_found:
         st.success(f"✅ Assignments Generated!")
         
