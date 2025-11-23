@@ -111,4 +111,292 @@ def preprocess_data(df, target_date, shift):
     }
     
     clean = pd.DataFrame()
-    for
+    for excel, internal in col_map.items():
+        match = next((c for c in df.columns if excel.lower() in c.lower()), None)
+        if match:
+            clean[internal] = df[match]
+        else:
+            clean[internal] = 0 if internal not in ['O2_Device', 'Med_Mgt', 'Force_Assign', 'Avoid_Nurse', 'Nurse Name', 'Current_Nurse', 'Discharge_Planned'] else None
+
+    binary_cols = ['Titratable_Gtt', 'Insulin_Gtt', 'Isolation', 'CiWA', 'Total_Care', 
+                   'Transfer_Planned', 'New_Patient', 'Room Empty',
+                   'Heparin_Ther', 'Heparin_NonTher', 'Restraints', 'Sitter', 'Rapid_Response']
+    
+    for c in binary_cols:
+        clean[c] = clean[c].astype(str).apply(lambda x: 1 if x.strip().lower() in ['yes', 'y', '1', 'true'] else 0)
+
+    clean['Discharge_Planned'] = pd.to_datetime(clean['Discharge_Planned'], errors='coerce').dt.date
+    clean['Is_Active_DC'] = 0
+    if shift == "Day":
+        clean.loc[clean['Discharge_Planned'] == target_date, 'Is_Active_DC'] = 1
+    
+    clean['DI_Score'] = pd.to_numeric(clean['DI_Score'], errors='coerce').fillna(0)
+    
+    mask_reset = (clean['Room Empty'] == 1) | (clean['New_Patient'] == 1)
+    clean['Calculated_Acuity'] = clean.apply(calculate_acuity_score, axis=1)
+    
+    if mask_reset.any():
+        clean.loc[mask_reset, 'Calculated_Acuity'] = 3
+        cols_to_wipe = ['Titratable_Gtt', 'Insulin_Gtt', 'Isolation', 'CiWA', 'Heparin_Ther', 'Restraints', 'DI_Score', 'Sitter', 'Rapid_Response']
+        clean.loc[mask_reset, cols_to_wipe] = 0
+
+    clean['Workload_Score'] = (
+        clean['Calculated_Acuity'] + 
+        (clean['DI_Score'] / 20.0) +
+        (clean['Restraints'] * 0.5) + 
+        (clean['Sitter'] * 0.5) +
+        (clean['Rapid_Response'] * 2.0)
+    )
+    
+    clean['Current_Nurse'] = clean['Current_Nurse'].fillna('Unknown')
+    for c in ['Force_Assign', 'Avoid_Nurse']:
+        clean[c] = clean[c].fillna('Unknown').astype(str)
+            
+    return clean
+
+# --- APP ---
+uploaded = st.file_uploader("Upload Input (.xlsx)", type=['xlsx', 'xlsm'])
+
+if uploaded:
+    raw = pd.read_excel(uploaded)
+    df = preprocess_data(raw, assignment_date, shift_type)
+    
+    with st.expander("📋 Data Preview"):
+        st.dataframe(df[['Room', 'Calculated_Acuity', 'Is_Active_DC', 'Discharge_Planned']])
+
+    charges = [n for n in df['Current_Nurse'].unique() if str(n).lower() not in ['nan','0','unknown','']]
+    charges.sort()
+    off_going_charge = st.selectbox("Off-Going Charge:", options=charges, index=0 if charges else None)
+
+    if st.button("🚀 Run Scheduler"):
+        with st.spinner("Optimizing..."):
+            nurses = df[['Nurse Name', 'Role', 'Max_Patients']].copy()
+            nurses = nurses.dropna(subset=['Nurse Name'])
+            nurses = nurses[nurses['Nurse Name'].astype(str).str.strip() != '']
+            nurses = nurses[~nurses['Nurse Name'].astype(str).str.lower().isin(['nan', 'unknown', '0'])]
+            
+            nurses = nurses.drop_duplicates()
+            nurses['Max_Patients'] = pd.to_numeric(nurses['Max_Patients'], errors='coerce').fillna(4).astype(int)
+            nurses['Role'] = nurses['Role'].fillna('RN').astype(str)
+            
+            patients = df.dropna(subset=['Room']).copy()
+            patients['Room'] = patients['Room'].astype(str)
+            off_going_nurses = [n for n in patients['Current_Nurse'].unique() if str(n).lower() not in ['nan', 'unknown', '0']]
+
+            if len(nurses) == 0:
+                st.error("❌ No nurses found! Check columns A-D.")
+                st.stop()
+
+            model = cp_model.CpModel()
+            x = {}
+            for n in nurses.index:
+                for p in patients.index:
+                    x[n, p] = model.NewBoolVar(f'x_{n}_{p}')
+
+            for p in patients.index:
+                model.Add(sum(x[n, p] for n in nurses.index) == 1)
+
+            for p, pat in patients.iterrows():
+                force = str(pat['Force_Assign']).strip().lower()
+                if force not in ['0', 'unknown', 'nan', '', 'none']:
+                    target_nurse = next((n for n in nurses.index if force in str(nurses.loc[n, 'Nurse Name']).lower()), None)
+                    if target_nurse is not None:
+                        model.Add(x[target_nurse, p] == 1)
+                    else:
+                        st.warning(f"⚠️ Force Assign Failed: Nurse '{pat['Force_Assign']}' not found.")
+
+                avoid = str(pat['Avoid_Nurse']).strip().lower()
+                if avoid not in ['0', 'unknown', 'nan', '', 'none']:
+                    target_nurse = next((n for n in nurses.index if avoid in str(nurses.loc[n, 'Nurse Name']).lower()), None)
+                    if target_nurse is not None:
+                        model.Add(x[target_nurse, p] == 0)
+
+            objs = []
+            nurse_dcs = []
+
+            for n, nurse in nurses.iterrows():
+                count = sum(x[n, p] for p in patients.index)
+                t_titr = sum(x[n, p] * (patients.loc[p, 'Titratable_Gtt'] + patients.loc[p, 'Heparin_Ther']) for p in patients.index)
+                t_ins = sum(x[n, p] * patients.loc[p, 'Insulin_Gtt'] for p in patients.index)
+                t_iso = sum(x[n, p] * patients.loc[p, 'Isolation'] for p in patients.index)
+                t_ciwa = sum(x[n, p] * patients.loc[p, 'CiWA'] for p in patients.index)
+                t_empty = sum(x[n, p] * patients.loc[p, 'Room Empty'] for p in patients.index)
+                t_rest = sum(x[n, p] * patients.loc[p, 'Restraints'] for p in patients.index)
+                t_dc = sum(x[n, p] * patients.loc[p, 'Is_Active_DC'] for p in patients.index)
+                
+                nurse_dcs.append(t_dc) 
+
+                has_insulin = model.NewBoolVar(f'has_ins_{n}')
+                model.Add(t_ins > 0).OnlyEnforceIf(has_insulin)
+                model.Add(t_ins == 0).OnlyEnforceIf(has_insulin.Not())
+                model.Add(count <= 3).OnlyEnforceIf(has_insulin)
+
+                roster_limit = int(nurse['Max_Patients'])
+                model.Add(count <= 6)
+                excess = model.NewIntVar(0, 6, f'excess_{n}')
+                model.Add(excess >= count - roster_limit)
+                model.Add(excess >= 0)
+                objs.append(excess * -500)
+
+                if str(nurse['Role']).lower() == 'charge':
+                    model.Add(t_empty == 0)
+                    model.Add(t_titr == 0)
+                    model.Add(t_ins == 0)
+                    model.Add(t_ciwa == 0)
+                    model.Add(t_rest == 0)
+                    model.Add(t_dc <= 1) 
+                    objs.append(t_dc * -100)
+                else:
+                    model.Add(t_ins <= limit_insulin)
+                    model.Add(t_titr + (10 * t_ins) <= 10)
+                    model.Add(t_titr <= limit_titratable)
+                    model.Add(t_ciwa <= 1)
+                    model.Add(t_rest <= limit_restraints)
+                
+                model.Add(t_iso <= 2)
+
+            min_dc = model.NewIntVar(0, 10, 'min_dc')
+            max_dc = model.NewIntVar(0, 10, 'max_dc')
+            model.AddMaxEquality(max_dc, nurse_dcs)
+            model.AddMinEquality(min_dc, nurse_dcs)
+            objs.append((max_dc - min_dc) * -50) 
+
+            for n in nurses.index:
+                ho = model.NewIntVar(0, 10, f'ho_{n}')
+                interactions = []
+                for off in off_going_nurses:
+                    p_idx = patients[patients['Current_Nurse'] == off].index
+                    active = model.NewBoolVar(f'act_{n}_{off}')
+                    model.Add(sum(x[n, p] for p in p_idx) > 0).OnlyEnforceIf(active)
+                    model.Add(sum(x[n, p] for p in p_idx) == 0).OnlyEnforceIf(active.Not())
+                    interactions.append(active)
+                model.Add(ho == sum(interactions))
+                objs.append(ho * -w_handoffs)
+
+                load = sum(x[n, p] * int(patients.loc[p, 'Workload_Score']*10) for p in patients.index)
+                
+                n_empty = sum(x[n, p] * patients.loc[p, 'Room Empty'] for p in patients.index)
+                has_empty = model.NewBoolVar(f'he_{n}')
+                model.Add(n_empty > 0).OnlyEnforceIf(has_empty)
+                model.Add(n_empty == 0).OnlyEnforceIf(has_empty.Not())
+                
+                pen = model.NewIntVar(0, 5000, f'pen_{n}')
+                model.Add(pen == load).OnlyEnforceIf(has_empty)
+                model.Add(pen == 0).OnlyEnforceIf(has_empty.Not())
+                objs.append(pen * -50)
+
+                for p, pat in patients.iterrows():
+                    if str(nurses.loc[n, 'Role']).lower() == 'charge':
+                        if pat['Current_Nurse'] == off_going_charge and pat['Is_Active_DC']==0:
+                            objs.append(x[n, p] * w_charge_pref)
+                        objs.append(x[n, p] * int(pat['Workload_Score']*10) * -5)
+                    else:
+                        if pat['New_Patient']==0 and pat['Room Empty']==0:
+                            if nurses.loc[n, 'Nurse Name'] == pat['Nurse_24hrs_Ago']:
+                                objs.append(x[n, p] * w_continuity)
+            
+            nurse_loads = []
+            for n in nurses.index:
+                l = sum(x[n, p] * int(patients.loc[p, 'Workload_Score']*10) for p in patients.index)
+                nurse_loads.append(l)
+            
+            mn = model.NewIntVar(0, 5000, 'min')
+            mx = model.NewIntVar(0, 5000, 'max')
+            model.AddMaxEquality(mx, nurse_loads)
+            model.AddMinEquality(mn, nurse_loads)
+            objs.append((mx - mn) * -w_acuity)
+
+            model.Maximize(sum(objs))
+            solver = cp_model.CpSolver()
+            solver.parameters.max_time_in_seconds = 120.0
+            status = solver.Solve(model)
+
+            if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+                st.success(f"✅ Assignments Generated!")
+                
+                # 1. NURSE SUMMARY
+                nurse_res = []
+                for n in nurses.index:
+                    my_p = []
+                    stats = {'work':0, 'dc':0}
+                    for p in patients.index:
+                        if solver.Value(x[n, p]):
+                            lbl = str(patients.loc[p, 'Room'])
+                            if patients.loc[p, 'Room Empty']: lbl += " (E)"
+                            if patients.loc[p, 'Is_Active_DC']: lbl += " (DC)"
+                            my_p.append(lbl)
+                            stats['work'] += patients.loc[p, 'Workload_Score']
+                            stats['dc'] += patients.loc[p, 'Is_Active_DC']
+                    
+                    nurse_res.append({
+                        'Nurse': nurses.loc[n, 'Nurse Name'],
+                        'Role': nurses.loc[n, 'Role'],
+                        'Count': len(my_p),
+                        'Rooms': ", ".join(my_p),
+                        'Workload': round(stats['work'], 1)
+                    })
+                
+                df_nurse_summary = pd.DataFrame(nurse_res)
+                st.subheader("📊 Nurse Workload Summary")
+                st.dataframe(df_nurse_summary)
+
+                # 2. PATIENT LIST
+                pat_res = []
+                def is_y(val): return "Yes" if val == 1 else ""
+                
+                for p in patients.index:
+                    assigned_n = "Unassigned"
+                    for n in nurses.index:
+                        if solver.Value(x[n, p]):
+                            assigned_n = nurses.loc[n, 'Nurse Name']
+                            break
+                    
+                    pat_res.append({
+                        'Room': patients.loc[p, 'Room'],
+                        'Oncoming Nurse': assigned_n,
+                        'Off-Going Nurse': patients.loc[p, 'Current_Nurse'],
+                        'Acuity': patients.loc[p, 'Calculated_Acuity'],
+                        'Titratable': is_y(patients.loc[p, 'Titratable_Gtt']),
+                        'Insulin': is_y(patients.loc[p, 'Insulin_Gtt']),
+                        'Heparin': is_y(patients.loc[p, 'Heparin_Ther']),
+                        'Restraints': is_y(patients.loc[p, 'Restraints']),
+                        'Sitter': is_y(patients.loc[p, 'Sitter']),
+                        'Rapid': is_y(patients.loc[p, 'Rapid_Response']),
+                        'Isolation': is_y(patients.loc[p, 'Isolation']),
+                        'CiWA': is_y(patients.loc[p, 'CiWA']),
+                        'Active Discharge': is_y(patients.loc[p, 'Is_Active_DC'])
+                    })
+                
+                df_patient_list = pd.DataFrame(pat_res)
+
+                # --- EXCEL BUFFER ---
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df_nurse_sorted = df_nurse_summary.sort_values(by='Role', key=lambda col: col.str.lower() != 'charge')
+                    df_nurse_sorted.to_excel(writer, sheet_name='Nurse Summary', index=False)
+                    df_patient_list.to_excel(writer, sheet_name='Patient List', index=False)
+                
+                st.download_button(
+                    label="💾 Download Assignment Workbook (.xlsx)",
+                    data=buffer.getvalue(),
+                    file_name=f"Assignments_{assignment_date}_{shift_type}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+                # --- EMAIL SECTION ---
+                st.markdown("---")
+                st.subheader("📧 Email Report")
+                recipient = st.text_input("Recipient Email:")
+                if st.button("Send to Email"):
+                    if recipient:
+                        buffer.seek(0)
+                        success, msg = send_email(recipient, buffer, f"Assignments_{assignment_date}_{shift_type}.xlsx")
+                        if success:
+                            st.success(msg)
+                        else:
+                            st.error(f"Failed: {msg}")
+                    else:
+                        st.warning("Please enter an email address.")
+
+            else:
+                st.error("No solution found. Check constraints.")
