@@ -56,7 +56,7 @@ def send_email(recipient_email, file_buffer, filename):
 
 # --- ACUITY CALCULATOR ---
 def calculate_acuity_score(row):
-    # Safety Net: If no clinical data, default to 3
+    # Safety Net
     if (row['O2_Device'] == 0) and (row['Med_Mgt'] == 0) and (row['Titratable_Gtt']==0):
         return 3 
 
@@ -64,78 +64,95 @@ def calculate_acuity_score(row):
     o2_str = str(row['O2_Device']).lower()
     med_str = str(row['Med_Mgt']).lower()
     
-    # --- LEVEL 4 (HIGH RISK) ---
+    # Level 4
     if 'bipap' in o2_str or 'hiflow' in o2_str or 'high' in o2_str: return 4
     if row['Restraints'] == 1: return 4
     if row['Insulin_Gtt'] == 1: return 4
     if row['Titratable_Gtt'] == 1: return 4 
         
-    # --- LEVEL 3 (COMPLEX) ---
-    if 'mid' in o2_str or 'midflow' in o2_str or 'venti' in o2_str: 
-        current_max_level = max(current_max_level, 3)
-    if row['Sitter'] == 1: 
-        current_max_level = max(current_max_level, 3)
-    if row['Heparin_NonTher'] == 1: 
-        current_max_level = max(current_max_level, 3)
-    if 'high' in med_str: 
-        current_max_level = max(current_max_level, 3)
-    if row['DI_Score'] > 60: 
-        current_max_level = max(current_max_level, 3)
+    # Level 3
+    if 'mid' in o2_str or 'venti' in o2_str: current_max_level = max(current_max_level, 3)
+    if row['Sitter'] == 1: current_max_level = max(current_max_level, 3)
+    if row['Heparin_NonTher'] == 1: current_max_level = max(current_max_level, 3)
+    if 'high' in med_str: current_max_level = max(current_max_level, 3)
+    if row['DI_Score'] > 60: current_max_level = max(current_max_level, 3)
 
-    # --- LEVEL 2 (MODERATE) ---
-    if 'nc' in o2_str or 'nasal' in o2_str: 
-        current_max_level = max(current_max_level, 2)
-    if row['Heparin_Ther'] == 1: 
-        current_max_level = max(current_max_level, 2)
-    if row['CiWA'] == 1: 
-        current_max_level = max(current_max_level, 2)
-    if 'med' in med_str: 
-        current_max_level = max(current_max_level, 2)
-    if row['DI_Score'] > 35: 
-        current_max_level = max(current_max_level, 2)
+    # Level 2
+    if 'nc' in o2_str or 'nasal' in o2_str: current_max_level = max(current_max_level, 2)
+    if row['Heparin_Ther'] == 1: current_max_level = max(current_max_level, 2)
+    if row['CiWA'] == 1: current_max_level = max(current_max_level, 2)
+    if 'med' in med_str: current_max_level = max(current_max_level, 2)
+    if row['DI_Score'] > 35: current_max_level = max(current_max_level, 2)
 
     return current_max_level
 
 # --- DATA PREP ---
 def preprocess_data(df, target_date, shift):
+    # Standardize input columns (remove spaces)
     df.columns = [str(c).strip() for c in df.columns]
     
-    col_map = {
-        'Nurse Name': 'Nurse Name', 'Role': 'Role', 'Max_Patients': 'Max_Patients',
-        'Room': 'Room', 
-        'Current_Nurse': 'Current_Nurse', 'Nurse_24hrs_Ago': 'Nurse_24hrs_Ago',
-        'Insulin_Gtt': 'Insulin_Gtt', 
-        'Heparin_Gtt (Non-therapuetic)': 'Heparin_NonTher',
-        'Heparin_Gtt (Therapuetic)': 'Heparin_Ther',
-        'Titratable_Gtt': 'Titratable_Gtt',
-        'Isolation': 'Isolation', 
-        'CiWA': 'CiWA', 
-        'Total_Care': 'Total_Care',
-        'Discharge_Planned': 'Discharge_Planned', 
-        'Transfer_Planned': 'Transfer_Planned',
-        'New_Patient': 'New_Patient', 
-        'Room Empty': 'Room Empty',
-        'Supplmental_O2': 'O2_Device',
-        'Med_Management': 'Med_Mgt',
-        'Restraints': 'Restraints',
-        'Sitter': 'Sitter',
-        'Rapid_Response': 'Rapid_Response',
-        'DI_Score': 'DI_Score',
-        'Force_Assign': 'Force_Assign',
-        'Avoid_Nurse': 'Avoid_Nurse'
+    # Define Mappings (Internal Name : List of possible Excel Headers)
+    # This allows us to catch "Titratable_Gtt" AND "Titratable Gtt" AND "Titratable"
+    mapping_dict = {
+        'Nurse Name': ['Nurse Name', 'Nurse'],
+        'Role': ['Role'],
+        'Max_Patients': ['Max_Patients', 'Max Patients'],
+        'Room': ['Room'],
+        'Current_Nurse': ['Current_Nurse', 'Current Nurse'],
+        'Nurse_24hrs_Ago': ['Nurse_24hrs_Ago', 'Nurse 24hrs Ago'],
+        
+        # Drips (Aggressive Matching)
+        'Insulin_Gtt': ['Insulin_Gtt', 'Insulin Gtt', 'Insulin'],
+        'Titratable_Gtt': ['Titratable_Gtt', 'Titratable Gtt', 'Titratable'],
+        'Heparin_Ther': ['Heparin_Gtt (Therapuetic)', 'Heparin Therapeutic', 'Heparin Ther'],
+        'Heparin_NonTher': ['Heparin_Gtt (Non-therapuetic)', 'Heparin Non-Therapeutic', 'Heparin NonTher'],
+        
+        # Clinical
+        'Isolation': ['Isolation', 'Iso'],
+        'CiWA': ['CiWA', 'CIWA'],
+        'Total_Care': ['Total_Care', 'Total Care'],
+        'Restraints': ['Restraints', 'Restraint'],
+        'Sitter': ['Sitter'],
+        'Rapid_Response': ['Rapid_Response', 'Rapid Response', 'Rapid'],
+        'DI_Score': ['DI_Score', 'Deterioration Index', 'DI'],
+        'O2_Device': ['Supplmental_O2', 'Supplemental O2', 'O2 Device', 'O2'],
+        'Med_Mgt': ['Med_Management', 'Med Management', 'Meds'],
+        
+        # Admin
+        'Discharge_Planned': ['Discharge_Planned', 'Discharge'],
+        'Transfer_Planned': ['Transfer_Planned', 'Transfer'],
+        'New_Patient': ['New_Patient', 'New Patient'],
+        'Room Empty': ['Room Empty', 'Empty Room'],
+        'Force_Assign': ['Force_Assign', 'Force'],
+        'Avoid_Nurse': ['Avoid_Nurse', 'Avoid']
     }
     
     clean = pd.DataFrame()
-    for excel_header, internal_name in col_map.items():
-        if excel_header in df.columns:
-            clean[internal_name] = df[excel_header]
-        else:
-            match = next((c for c in df.columns if c.lower() == excel_header.lower()), None)
+    
+    # Fuzzy Match Loop
+    for internal, candidates in mapping_dict.items():
+        found = False
+        for cand in candidates:
+            # Try exact match
+            if cand in df.columns:
+                clean[internal] = df[cand]
+                found = True
+                break
+            # Try case-insensitive match
+            match = next((c for c in df.columns if c.lower() == cand.lower()), None)
             if match:
-                clean[internal_name] = df[match]
+                clean[internal] = df[match]
+                found = True
+                break
+        
+        if not found:
+            # Default Values
+            if internal in ['O2_Device', 'Med_Mgt', 'Force_Assign', 'Avoid_Nurse', 'Nurse Name', 'Current_Nurse']:
+                clean[internal] = 0
             else:
-                clean[internal_name] = 0 if internal_name not in ['O2_Device', 'Med_Mgt', 'Force_Assign', 'Avoid_Nurse', 'Nurse Name', 'Current_Nurse'] else None
+                clean[internal] = 0
 
+    # Clean Binary
     def clean_bool(val):
         s = str(val).strip().lower()
         if s in ['yes', 'y', '1', 'true', '1:1', 'vsc', 'safety']: return 1
@@ -184,8 +201,12 @@ if uploaded:
     raw = pd.read_excel(uploaded)
     df = preprocess_data(raw, assignment_date, shift_type)
     
-    with st.expander("📋 Data Preview"):
-        st.dataframe(df[['Room', 'Calculated_Acuity', 'Titratable_Gtt', 'Insulin_Gtt', 'Heparin_NonTher']])
+    # --- DEBUG SECTION ---
+    with st.expander("🔍 Debug: Check Drips & Acuity"):
+        st.write("This table shows what the script 'sees' before assigning.")
+        # Filter to show only rows with clinical data
+        debug_view = df[['Room', 'Titratable_Gtt', 'Insulin_Gtt', 'Heparin_Ther', 'Heparin_NonTher', 'Calculated_Acuity']]
+        st.dataframe(debug_view)
 
     charges = [n for n in df['Current_Nurse'].unique() if str(n).lower() not in ['nan','0','unknown','']]
     charges.sort()
@@ -197,7 +218,6 @@ if uploaded:
             nurses = nurses.dropna(subset=['Nurse Name'])
             nurses = nurses[nurses['Nurse Name'].astype(str).str.strip() != '']
             nurses = nurses[~nurses['Nurse Name'].astype(str).str.lower().isin(['nan', 'unknown', '0'])]
-            
             nurses = nurses.drop_duplicates()
             nurses['Max_Patients'] = pd.to_numeric(nurses['Max_Patients'], errors='coerce').fillna(4).astype(int)
             nurses['Role'] = nurses['Role'].fillna('RN').astype(str)
@@ -238,7 +258,6 @@ if uploaded:
             for n, nurse in nurses.iterrows():
                 count = sum(x[n, p] for p in patients.index)
                 
-                # Sums (Include ALL drips in logic)
                 t_titr = sum(x[n, p] * patients.loc[p, 'Titratable_Gtt'] for p in patients.index)
                 t_ins = sum(x[n, p] * patients.loc[p, 'Insulin_Gtt'] for p in patients.index)
                 t_iso = sum(x[n, p] * patients.loc[p, 'Isolation'] for p in patients.index)
@@ -249,7 +268,6 @@ if uploaded:
                 
                 nurse_dcs.append(t_dc) 
 
-                # Safety Rules
                 model.Add(t_ins <= limit_insulin)
                 has_insulin = model.NewBoolVar(f'has_ins_{n}')
                 model.Add(t_ins > 0).OnlyEnforceIf(has_insulin)
@@ -297,12 +315,10 @@ if uploaded:
                 objs.append(ho * -w_handoffs)
 
                 load = sum(x[n, p] * int(patients.loc[p, 'Workload_Score']*10) for p in patients.index)
-                
                 n_empty = sum(x[n, p] * patients.loc[p, 'Room Empty'] for p in patients.index)
                 has_empty = model.NewBoolVar(f'he_{n}')
                 model.Add(n_empty > 0).OnlyEnforceIf(has_empty)
                 model.Add(n_empty == 0).OnlyEnforceIf(has_empty.Not())
-                
                 pen = model.NewIntVar(0, 5000, f'pen_{n}')
                 model.Add(pen == load).OnlyEnforceIf(has_empty)
                 model.Add(pen == 0).OnlyEnforceIf(has_empty.Not())
@@ -360,6 +376,9 @@ if uploaded:
 
                 pat_res = []
                 def is_y(val): return "Yes" if val == 1 else ""
+                def get_o2(val): return str(val) if str(val)!='0' else ""
+                def get_sitter(val): return "1:1" if val==1 else ""
+
                 for p in patients.index:
                     assigned_n = "Unassigned"
                     for n in nurses.index:
@@ -375,17 +394,17 @@ if uploaded:
                         'Insulin': is_y(patients.loc[p, 'Insulin_Gtt']),
                         'Heparin': is_y(patients.loc[p, 'Heparin_Ther']),
                         'Restraints': is_y(patients.loc[p, 'Restraints']),
-                        'Sitter': is_y(patients.loc[p, 'Sitter']),
+                        'Sitter': get_sitter(patients.loc[p, 'Sitter']),
                         'Rapid': is_y(patients.loc[p, 'Rapid_Response']),
                         'Isolation': is_y(patients.loc[p, 'Isolation']),
                         'CiWA': is_y(patients.loc[p, 'CiWA']),
+                        'O2': get_o2(patients.loc[p, 'O2_Device']),
                         'Active Discharge': is_y(patients.loc[p, 'Is_Active_DC'])
                     })
                 st.session_state.df_patient = pd.DataFrame(pat_res)
 
-                # --- FIXED MANAGER REPORT LOGIC ---
                 mgr_res = []
-                # Fix: Include ALL drip types in the mask
+                # Combined Drip Check
                 drip_mask = (patients['Titratable_Gtt']==1) | (patients['Insulin_Gtt']==1) | (patients['Heparin_Ther']==1) | (patients['Heparin_NonTher']==1)
                 if drip_mask.any():
                     rooms = patients.loc[drip_mask, 'Room'].tolist()
@@ -412,7 +431,6 @@ if uploaded:
                     mgr_res.append({'Category': 'Today\'s Discharges', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
 
                 st.session_state.df_manager = pd.DataFrame(mgr_res)
-                
                 st.session_state.total_acuity = patients['Calculated_Acuity'].sum()
                 st.session_state.total_restr = patients['Restraints'].sum()
                 st.session_state.total_rapid = patients['Rapid_Response'].sum()
