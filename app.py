@@ -86,6 +86,7 @@ def calculate_acuity_score(row):
         if row['Heparin_NonTher'] == 1: current_max_level = 3
         if 'high' in med_str: current_max_level = 3
         if row['DI_Score'] > 60: current_max_level = 3
+        # Central Line Check (Ignore '0', 'nan', 'none')
         if line_str not in ['0', 'nan', '', 'none', 'false', 'no']: current_max_level = 3
 
     # --- LEVEL 2 (MODERATE) ---
@@ -185,19 +186,23 @@ def preprocess_data(df, target_date, shift):
     
     if mask_reset.any():
         clean.loc[mask_reset, 'Calculated_Acuity'] = 3
-        cols_to_wipe = ['Titratable_Gtt', 'Insulin_Gtt', 'Isolation', 'CiWA', 'Heparin_Ther', 'Heparin_NonTher', 'Restraints', 'DI_Score', 'Sitter', 'Has_Rapid', 'Foley', 'Drains', 'Has_Line']
+        cols_to_wipe = ['Titratable_Gtt', 'Insulin_Gtt', 'Isolation', 'CiWA', 'Heparin_Ther', 'Heparin_NonTher', 'Restraints', 'DI_Score', 'Sitter', 'Has_Rapid', 'Foley', 'Drains', 'Has_Line', 'Total_Care']
         clean.loc[mask_reset, cols_to_wipe] = 0
         clean.loc[mask_reset, 'Rapid_Response'] = 0
         clean.loc[mask_reset, 'Central_Line'] = 0
 
+    # *** COMPREHENSIVE WORKLOAD SCORE ***
     clean['Workload_Score'] = (
         clean['Calculated_Acuity'] + 
         (clean['DI_Score'] / 20.0) +
+        (clean['Has_Rapid'] * 2.0) +
+        (clean['Total_Care'] * 1.0) +
         (clean['Restraints'] * 0.5) + 
         (clean['Sitter'] * 0.5) +
-        (clean['Has_Rapid'] * 2.0) +
+        (clean['Isolation'] * 0.5) +
         (clean['Drains'] * 0.5) + 
-        (clean['Foley'] * 0.25)
+        (clean['Foley'] * 0.25) +
+        (clean['Has_Line'] * 0.25)
     )
     
     clean['Current_Nurse'] = clean['Current_Nurse'].fillna('Unknown')
@@ -214,7 +219,7 @@ if uploaded:
     df = preprocess_data(raw, assignment_date, shift_type)
     
     with st.expander("📋 Data Preview"):
-        st.dataframe(df[['Room', 'Self_Reported_Acuity', 'Calculated_Acuity', 'Central_Line', 'Workload_Score']])
+        st.dataframe(df[['Room', 'Self_Reported_Acuity', 'Calculated_Acuity', 'Workload_Score', 'Total_Care', 'Isolation']])
 
     charges = [n for n in df['Current_Nurse'].unique() if str(n).lower() not in ['nan','0','unknown','']]
     charges.sort()
@@ -414,6 +419,7 @@ if uploaded:
                         'Sitter': get_sitter(patients.loc[p, 'Sitter']),
                         'Rapid/Code': str(patients.loc[p, 'Rapid_Response']) if patients.loc[p, 'Has_Rapid']==1 else "",
                         'Isolation': is_y(patients.loc[p, 'Isolation']),
+                        'Total Care': is_y(patients.loc[p, 'Total_Care']),
                         'O2': get_o2(patients.loc[p, 'O2_Device']),
                         'Foley': is_y(patients.loc[p, 'Foley']),
                         'Drains': is_y(patients.loc[p, 'Drains']),
@@ -437,7 +443,7 @@ if uploaded:
                 if drip_list:
                     mgr_res.append({'Category': 'Active Drips', 'Count': len(drip_list), 'Rooms': ", ".join(drip_list)})
 
-                # Central Lines (New)
+                # Central Lines
                 line_list = []
                 for i, r in patients.iterrows():
                     if r['Has_Line'] == 1:
