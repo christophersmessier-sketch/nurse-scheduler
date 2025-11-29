@@ -36,13 +36,11 @@ def send_email(recipient_input, file_buffer, filename):
         smtp_server = st.secrets["email"]["smtp_server"]
         smtp_port = st.secrets["email"]["smtp_port"]
 
-        # Clean up the recipient list (remove spaces, handle commas)
         recipients = [email.strip() for email in recipient_input.split(',')]
 
         msg = EmailMessage()
         msg['Subject'] = f"Nurse Assignments - {assignment_date} ({shift_type})"
         msg['From'] = sender_email
-        # Join them back together properly for the header
         msg['To'] = ", ".join(recipients)
         msg.set_content(f"Attached is the Nurse Assignment Workbook for {assignment_date}.\n\nTabs Included:\n1. Nurse Summary\n2. Patient List\n3. Manager/Safety Huddle Report")
 
@@ -60,42 +58,53 @@ def send_email(recipient_input, file_buffer, filename):
 
 # --- ACUITY CALCULATOR ---
 def calculate_acuity_score(row):
-    # Safety Net
-    if (row['O2_Device'] == 0) and (row['Med_Mgt'] == 0) and (row['Titratable_Gtt']==0):
-        return 3 
+    # 1. Get Self-Reported Score (The "Human Judgment")
+    try:
+        self_reported = int(row['Self_Reported_Acuity'])
+    except:
+        self_reported = 1 # Default if missing
 
-    current_max_level = 1
+    # 2. Calculate Data-Driven Score (The "Clinical Reality")
+    calculated_level = 1
+    
     o2_str = str(row['O2_Device']).lower()
     med_str = str(row['Med_Mgt']).lower()
     rapid_str = str(row['Rapid_Response']).lower()
+    line_str = str(row['Central_Line']).lower()
     
     # --- LEVEL 4 (HIGH RISK) ---
-    if 'bipap' in o2_str or 'hiflow' in o2_str or 'high' in o2_str: return 4
-    if 'new' in o2_str and 'trach' in o2_str: return 4 
-    if row['Restraints'] == 1: return 4
-    if 'code' in rapid_str: return 4 
-    if 'rapid' in rapid_str: return 4 
-    if row['Insulin_Gtt'] == 1: return 4
-    if row['Titratable_Gtt'] == 1: return 4 
+    if 'bipap' in o2_str or 'hiflow' in o2_str or 'high' in o2_str: calculated_level = 4
+    if 'new' in o2_str and 'trach' in o2_str: calculated_level = 4 
+    if row['Restraints'] == 1: calculated_level = 4
+    if 'code' in rapid_str: calculated_level = 4 
+    if 'rapid' in rapid_str: calculated_level = 4 
+    if row['Insulin_Gtt'] == 1: calculated_level = 4
+    if row['Titratable_Gtt'] == 1: calculated_level = 4 
         
     # --- LEVEL 3 (COMPLEX) ---
-    if 'mid' in o2_str or 'venti' in o2_str: current_max_level = max(current_max_level, 3)
-    if 'stable' in o2_str and 'trach' in o2_str: current_max_level = max(current_max_level, 3)
-    if row['Drains'] == 1: current_max_level = max(current_max_level, 3)
-    if row['Sitter'] == 1: current_max_level = max(current_max_level, 3)
-    if row['Heparin_NonTher'] == 1: current_max_level = max(current_max_level, 3)
-    if 'high' in med_str: current_max_level = max(current_max_level, 3)
-    if row['DI_Score'] > 60: current_max_level = max(current_max_level, 3)
+    if calculated_level < 3:
+        if 'mid' in o2_str or 'venti' in o2_str: calculated_level = 3
+        if 'stable' in o2_str and 'trach' in o2_str: calculated_level = 3
+        if row['Drains'] == 1: calculated_level = 3
+        if row['Sitter'] == 1: calculated_level = 3
+        if row['Heparin_NonTher'] == 1: calculated_level = 3
+        if 'high' in med_str: calculated_level = 3
+        if row['DI_Score'] > 60: calculated_level = 3
+        if line_str not in ['0', 'nan', '', 'none']: calculated_level = 3
 
     # --- LEVEL 2 (MODERATE) ---
-    if 'nc' in o2_str or 'nasal' in o2_str: current_max_level = max(current_max_level, 2)
-    if row['Foley'] == 1: current_max_level = max(current_max_level, 2)
-    if row['Heparin_Ther'] == 1: current_max_level = max(current_max_level, 2)
-    if row['CiWA'] == 1: current_max_level = max(current_max_level, 2)
-    if 'med' in med_str: current_max_level = max(current_max_level, 2)
-    if row['DI_Score'] > 35: current_max_level = max(current_max_level, 2)
+    if calculated_level < 2:
+        if 'nc' in o2_str or 'nasal' in o2_str: calculated_level = 2
+        if row['Foley'] == 1: calculated_level = 2
+        if row['Heparin_Ther'] == 1: calculated_level = 2
+        if row['CiWA'] == 1: calculated_level = 2
+        if 'med' in med_str: calculated_level = 2
+        if row['DI_Score'] > 35: calculated_level = 2
 
-    return current_max_level
+    # 3. Final Score is the HIGHER of the two
+    # This prevents the script from downgrading a nurse's concern, 
+    # but forces an upgrade if the nurse missed a drip/rapid.
+    return max(self_reported, calculated_level)
 
 # --- DATA PREP ---
 def preprocess_data(df, target_date, shift):
@@ -116,10 +125,12 @@ def preprocess_data(df, target_date, shift):
         'Med_Management': 'Med_Mgt',
         'Restraints': 'Restraints',
         'Sitter': 'Sitter',
-        'Rapid_Response': 'Rapid_Response',
+        'Rapid_Response/Code': 'Rapid_Response',
         'Foley': 'Foley',
         'Drains/Tubes': 'Drains',
+        'Central_Line': 'Central_Line',
         'DI_Score': 'DI_Score',
+        'Acuity_Score': 'Self_Reported_Acuity', # NEW: Column G
         'Force_Assign': 'Force_Assign', 'Avoid_Nurse': 'Avoid_Nurse'
     }
     
@@ -131,6 +142,7 @@ def preprocess_data(df, target_date, shift):
             match = next((c for c in df.columns if c.lower() == excel_header.lower()), None)
             clean[internal_name] = df[match] if match else 0
 
+    # Heparin Logic
     if 'Heparin_Gtt' in clean.columns and not clean['Heparin_Gtt'].astype(str).str.contains('0').all():
         clean['Heparin_NonTher'] = clean['Heparin_Gtt'].astype(str).apply(lambda x: 1 if 'non' in x.lower() else 0)
         clean['Heparin_Ther'] = clean['Heparin_Gtt'].astype(str).apply(lambda x: 1 if 'ther' in x.lower() and 'non' not in x.lower() else 0)
@@ -157,6 +169,9 @@ def preprocess_data(df, target_date, shift):
     clean['Rapid_Response'] = clean['Rapid_Response'].fillna(0).astype(str)
     clean['Has_Rapid'] = clean['Rapid_Response'].apply(lambda x: 1 if x.lower() in ['yes', '1', 'rapid', 'code'] else 0)
 
+    clean['Central_Line'] = clean['Central_Line'].fillna(0).astype(str)
+    clean['Has_Line'] = clean['Central_Line'].apply(lambda x: 1 if x.lower() not in ['0', 'nan', 'none', ''] else 0)
+
     clean['Discharge_Planned'] = pd.to_datetime(clean['Discharge_Planned'], errors='coerce').dt.date
     clean['Is_Active_DC'] = 0
     if shift == "Day":
@@ -165,13 +180,16 @@ def preprocess_data(df, target_date, shift):
     clean['DI_Score'] = pd.to_numeric(clean['DI_Score'], errors='coerce').fillna(0)
     
     mask_reset = (clean['Room Empty'] == 1) | (clean['New_Patient'] == 1)
+    
+    # Calculate Acuity (Now uses Column G too)
     clean['Calculated_Acuity'] = clean.apply(calculate_acuity_score, axis=1)
     
     if mask_reset.any():
         clean.loc[mask_reset, 'Calculated_Acuity'] = 3
-        cols_to_wipe = ['Titratable_Gtt', 'Insulin_Gtt', 'Isolation', 'CiWA', 'Heparin_Ther', 'Heparin_NonTher', 'Restraints', 'DI_Score', 'Sitter', 'Has_Rapid', 'Foley', 'Drains']
+        cols_to_wipe = ['Titratable_Gtt', 'Insulin_Gtt', 'Isolation', 'CiWA', 'Heparin_Ther', 'Heparin_NonTher', 'Restraints', 'DI_Score', 'Sitter', 'Has_Rapid', 'Foley', 'Drains', 'Has_Line']
         clean.loc[mask_reset, cols_to_wipe] = 0
         clean.loc[mask_reset, 'Rapid_Response'] = 0
+        clean.loc[mask_reset, 'Central_Line'] = 0
 
     clean['Workload_Score'] = (
         clean['Calculated_Acuity'] + 
@@ -197,7 +215,8 @@ if uploaded:
     df = preprocess_data(raw, assignment_date, shift_type)
     
     with st.expander("📋 Data Preview"):
-        st.dataframe(df[['Room', 'Calculated_Acuity', 'O2_Device', 'Drains', 'Rapid_Response']])
+        # Show Nurse Score vs Calc Score to verify logic
+        st.dataframe(df[['Room', 'Self_Reported_Acuity', 'Calculated_Acuity', 'Workload_Score']])
 
     charges = [n for n in df['Current_Nurse'].unique() if str(n).lower() not in ['nan','0','unknown','']]
     charges.sort()
@@ -348,6 +367,7 @@ if uploaded:
                 nurse_res = []
                 for n in nurses.index:
                     my_p = []
+                    handoff_sources = set()
                     stats = {'work':0, 'dc':0}
                     for p in patients.index:
                         if solver.Value(x[n, p]):
@@ -357,12 +377,16 @@ if uploaded:
                             my_p.append(lbl)
                             stats['work'] += patients.loc[p, 'Workload_Score']
                             stats['dc'] += patients.loc[p, 'Is_Active_DC']
+                            src = str(patients.loc[p, 'Current_Nurse'])
+                            if src.lower() not in ['nan', 'unknown', '0', '']:
+                                handoff_sources.add(src)
                     nurse_res.append({
                         'Nurse': nurses.loc[n, 'Nurse Name'],
                         'Role': nurses.loc[n, 'Role'],
                         'Count': len(my_p),
                         'Rooms': ", ".join(my_p),
-                        'Workload': round(stats['work'], 1)
+                        'Workload': round(stats['work'], 1),
+                        'Report From': ", ".join(sorted(handoff_sources))
                     })
                 st.session_state.df_nurse = pd.DataFrame(nurse_res)
 
@@ -392,11 +416,12 @@ if uploaded:
                         'O2': get_o2(patients.loc[p, 'O2_Device']),
                         'Foley': is_y(patients.loc[p, 'Foley']),
                         'Drains': is_y(patients.loc[p, 'Drains']),
+                        'Central Line': str(patients.loc[p, 'Central_Line']) if patients.loc[p, 'Has_Line']==1 else "",
                         'Active Discharge': is_y(patients.loc[p, 'Is_Active_DC'])
                     })
                 st.session_state.df_patient = pd.DataFrame(pat_res)
 
-                # --- MANAGER REPORT ---
+                # --- MANAGER REPORT (UPDATED) ---
                 mgr_res = []
                 # Drips
                 drip_list = []
@@ -408,7 +433,6 @@ if uploaded:
                     if r['Heparin_NonTher']==1: drips.append("Heparin(NT)")
                     if drips:
                         drip_list.append(f"{r['Room']} ({', '.join(drips)})")
-                
                 if drip_list:
                     mgr_res.append({'Category': 'Active Drips', 'Count': len(drip_list), 'Rooms': ", ".join(drip_list)})
 
@@ -418,15 +442,23 @@ if uploaded:
                     if str(r['O2_Device']) not in ['0', 'nan', '']:
                         resp_list.append(f"{r['Room']} ({r['O2_Device']})")
                 if resp_list:
-                    mgr_res.append({'Category': 'Respiratory (O2/Trach)', 'Count': len(resp_list), 'Rooms': ", ".join(resp_list)})
+                    mgr_res.append({'Category': 'Respiratory', 'Count': len(resp_list), 'Rooms': ", ".join(resp_list)})
 
-                # Rapids
+                # Rapids/Codes
                 rapid_list = []
                 for i, r in patients.iterrows():
                     if r['Has_Rapid'] == 1:
                         rapid_list.append(f"{r['Room']} ({r['Rapid_Response']})")
                 if rapid_list:
                     mgr_res.append({'Category': 'Events (Rapid/Code)', 'Count': len(rapid_list), 'Rooms': ", ".join(rapid_list)})
+
+                # Central Lines
+                line_list = []
+                for i, r in patients.iterrows():
+                    if r['Has_Line'] == 1:
+                        line_list.append(f"{r['Room']} ({r['Central_Line']})")
+                if line_list:
+                    mgr_res.append({'Category': 'Central Lines', 'Count': len(line_list), 'Rooms': ", ".join(line_list)})
 
                 # Restraints
                 rest_mask = (patients['Restraints']==1)
@@ -441,6 +473,12 @@ if uploaded:
                         sit_list.append(f"{r['Room']} (1:1)")
                 if sit_list:
                     mgr_res.append({'Category': 'Sitters', 'Count': len(sit_list), 'Rooms': ", ".join(sit_list)})
+
+                # Foleys
+                foley_mask = (patients['Foley']==1)
+                if foley_mask.any():
+                    rooms = patients.loc[foley_mask, 'Room'].tolist()
+                    mgr_res.append({'Category': 'Foleys', 'Count': len(rooms), 'Rooms': ", ".join(rooms)})
 
                 # Discharges
                 dc_mask = (patients['Is_Active_DC']==1)
